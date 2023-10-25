@@ -1,0 +1,22 @@
+version: '3'
+services:
+  database:
+    image: mongo
+    ports:
+      - 27017:27017
+    volumes:
+      - ./localdata:/data/db
+
+  api:
+    build:
+      context: .
+      dockerfile: dockerfile
+    ports:
+      - 8080:8080
+    
+
+  
+
+volumes:
+  mongodb:
+  api:
