@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
 	"reflect"
@@ -14,11 +13,11 @@ import (
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 
-    
+	"github.com/evanyip05/Cloud/config"
 )
 
-// close me somehow
-var mongoClient *mongo.Client = nil
+var mongoComposed = true
+var mongoClient *mongo.Client = nil // close me maybe
 var dbName = "myData"
 var colName = "col1"
 
@@ -27,64 +26,69 @@ func main() {
     InitHTTP()
 }
 
-func InitHTTP() {
-    http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {MarshalAndSend(w, "this is the backend.")})
-    
+// http handler
+func InitHTTP() {    
+    // make a post request with encoded json
+    // data = json.marshal(whatever)
+    // http.Post("http://localhost:8080/put", "application/json", bytes.NewBuffer(data))
     http.HandleFunc("/put", func(w http.ResponseWriter, r *http.Request) {
-        // Check the HTTP method
 	    if r.Method != http.MethodPost {w.WriteHeader(http.StatusMethodNotAllowed); return}
 
-	    // Parse the JSON payload
-	    var payload json.RawMessage
+	    var payload config.Payload
         if json.NewDecoder(r.Body).Decode(&payload) != nil {w.WriteHeader(http.StatusBadRequest); return}
 
-        log.Println(payload)
-
         // convert decoded json struct to bson, write to mongo
-        // find a better storage method to write anything to db, or find final datastruct
         objID := WriteData(dbName, colName, StructToBson(payload))
 
-        // return id
-        MarshalAndSend(w, strings.Split(objID.String(), "\"")[1])
+        MarshalAndSend(w, config.MongoID{ID: strings.Split(objID.String(), "\"")[1]}) // send back the id of the mongo entry
     })
 
-    // localhost:8080/get?filter=key:value key2:value2
+    // localhost:8080/get?filter=key:value key2:value2     parameter filtering
+    // OR
+    // localhost:8080/get?_id=6537236861552323c9b4c264     mongo id
     http.HandleFunc("/get", func(w http.ResponseWriter, r *http.Request) {
         requests := r.URL.Query()
-        filters := strings.Split(requests.Get("filter"), " ")
-        filter := bson.M{}
 
-        for _, f := range filters {
+        // parse url _id param, prioritize this if it exists
+        if requests.Get("_id") != "" {
+            id, err := primitive.ObjectIDFromHex(requests.Get("_id"))
+	        if err != nil {w.WriteHeader(http.StatusBadRequest); MarshalAndSend(w, "malformed \"_id\""); return}     
+            MarshalAndSend(w, config.MongoEntries{Entries: ReadData(dbName, colName, bson.M{"_id": id})}) // send the single entry
+            return
+        }
+
+        // check for filter based search 
+        if requests.Get("filter") == "" {w.WriteHeader(http.StatusBadRequest); MarshalAndSend(w, "missing filter or _id"); return}
+
+        // parse url filter param
+        filter := bson.M{}
+        for _, f := range strings.Split(requests.Get("filter"), " ") {
             kvp := strings.Split(f, ":")
             filter[kvp[0]] = kvp[1]
         }
 
-        MarshalAndSend(w, {Entries: ReadData(dbName, colName, filter)})
+        MarshalAndSend(w, config.MongoEntries{Entries: ReadData(dbName, colName, filter)})
     })
 
-    http.HandleFunc("/ping", func(w http.ResponseWriter, r *http.Request) {
-		log.Println("got request from", fmt.Sprint(r.Host, r.URL))
-        MarshalAndSend(w, "pong")
-	})
-
-    http.HandleFunc("/test", func(w http.ResponseWriter, r *http.Request) {
-        log.Println("sending OK")
-        w.WriteHeader(http.StatusOK)
-    })
-
+    // server conf message
     log.Println("listening on 0.0.0.0:8080")
-
     err := http.ListenAndServe("0.0.0.0:8080", nil)
 	if err != nil {
 		log.Println("error listening and serving")
 	}
 }
 
+
+// mongo handler 
 func InitMongo() {
-    // while composed
-	//clientOptions := options.Client().ApplyURI("mongodb://database:27017")
-	// while standalone
-    clientOptions := options.Client().ApplyURI("mongodb://localhost:27017")
+    var clientOptions *options.ClientOptions
+    if mongoComposed {
+        clientOptions = options.Client().ApplyURI("mongodb://database:27017") // equivalent of localhost while its on a docker container (for the go api)
+    } else {
+        clientOptions = options.Client().ApplyURI("mongodb://localhost:27017")
+    }
+
+    // connect go api to mongo
     client, err := mongo.Connect(context.TODO(), clientOptions)
     if err != nil {
         log.Fatal("Failed to connect to MongoDB:", err)
@@ -96,11 +100,12 @@ func InitMongo() {
         log.Fatal("Failed to ping the MongoDB server:", err)
     }
 
-    mongoClient = client
+    mongoClient = client // global
 
     log.Println("Connected to MongoDB!")
 }
 
+// mongo write boilerplate
 func WriteData(dbName, colName string, data primitive.M) primitive.ObjectID {
     collection := mongoClient.Database(dbName).Collection(colName)
 
@@ -121,8 +126,11 @@ func WriteData(dbName, colName string, data primitive.M) primitive.ObjectID {
     return insertedID
 }
 
+// mongo read boilerplate
 func ReadData(dbName, colName string, selector primitive.M) []primitive.M {
     collection := mongoClient.Database(dbName).Collection(colName)
+
+    log.Println(selector)
 
     cursor, err := collection.Find(context.TODO(), selector)
 
@@ -147,6 +155,7 @@ func ReadData(dbName, colName string, selector primitive.M) []primitive.M {
     return results
 }
 
+// send basic messages 
 func MarshalAndSend(w http.ResponseWriter, data any) {
     json, err := json.Marshal(data)
     if err != nil {w.WriteHeader(http.StatusInternalServerError); return}
